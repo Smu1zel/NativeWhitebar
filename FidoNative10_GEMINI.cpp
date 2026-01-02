@@ -4,8 +4,10 @@
  * * Dependencies: MSYS2 OpenSSL
  * pacman -S mingw-w64-x86_64-openssl (or mingw-w64-i686-openssl for 32-bit XP)
  * * Compile with MSYS2/MinGW64:
- * g++ WhitebarNative.cpp -o Whitebar.exe -mconsole -mwindows -static -lssl
- * -lcrypto -lws2_32 -lcomctl32 -lgdi32 -lole32 -lrpcrt4 -lcrypt32 -lcomdlg32
+ * g++ -I/c/Users/Lynden/Downloads/openssl/include
+ * -L/c/Users/Lynden/Downloads/openssl FidoNative10_GEMINI.cpp -o WhitebarNative.exe
+ * -mconsole -mwindows -static -lssl -lcrypto -lws2_32 -lcomctl32 -lgdi32
+ * -lole32 -lrpcrt4 -lcrypt32 -mno-mmx -mno-sse -mno-sse2 -lcomdlg32
  */
 #define UNICODE
 #define _UNICODE
@@ -851,6 +853,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (GetSaveFileName(&ofn) == TRUE) {
           wstring filePath = ofn.lpstrFile;
           EnableWindow(hBtnDownload, FALSE);
+          EnableWindow(hCheckDl, FALSE);
+          for (int i = 0; i < 5; i++)
+            EnableWindow(hCombos[i], FALSE);
+
           SetStatus(L"Downloading... Please wait.");
 
           thread([=]() {
@@ -890,6 +896,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     break;
   case WM_DOWNLOAD_DONE:
     EnableWindow(hBtnDownload, TRUE);
+    EnableWindow(hCheckDl, TRUE);
+    // Re-enable combos based on state (Architecture and lower is surely
+    // populated if we downloaded)
+    for (int i = 0; i < 5; i++)
+      EnableWindow(hCombos[i], TRUE);
+
     SetStatus(wParam == 1 ? L"Download Complete!" : L"Download Failed.");
     SendMessage(hProgress, PBM_SETPOS, 0, 0);
     if (wParam == 1)
