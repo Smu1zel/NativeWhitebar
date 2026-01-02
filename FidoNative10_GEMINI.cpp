@@ -38,10 +38,11 @@
 // OpenSSL Headers
 #include <openssl/err.h>
 #include <openssl/ssl.h>
-
+/*
 #undef freopen_s
-#define freopen_s(pf, fn, mode, stream) ((*(pf)=freopen((fn),(mode),(stream)))?0:errno)
-
+#define freopen_s(pf, fn, mode, stream)                                        \
+  ((*(pf) = freopen((fn), (mode), (stream))) ? 0 : errno)
+*/
 // Link against system libraries (MinGW specific pragma)
 #pragma comment(lib, "ws2_32")
 #pragma comment(lib, "comctl32")
@@ -143,6 +144,75 @@ bool ParseUrl(const string &url, string &host, string &path, bool &isHttps) {
   return true;
 }
 
+// Helper types for dynamic loading of XP+ networking functions (getaddrinfo)
+typedef int(WSAAPI *getaddrinfo_t)(const char *, const char *,
+                                   const struct addrinfo *, struct addrinfo **);
+typedef void(WSAAPI *freeaddrinfo_t)(struct addrinfo *);
+
+getaddrinfo_t p_getaddrinfo = NULL;
+freeaddrinfo_t p_freeaddrinfo = NULL;
+
+void LoadNetworking() {
+  HMODULE hWs2 = LoadLibraryA("ws2_32.dll");
+  if (hWs2) {
+    p_getaddrinfo = (getaddrinfo_t)GetProcAddress(hWs2, "getaddrinfo");
+    p_freeaddrinfo = (freeaddrinfo_t)GetProcAddress(hWs2, "freeaddrinfo");
+  }
+}
+
+// Win2k Compatible Host Resolution
+// Returns a socket connected to the host/port
+SOCKET ConnectToHost(const string &host, bool isHttps) {
+  if (p_getaddrinfo) {
+    // Modern (XP+) Path
+    struct addrinfo hints = {0}, *res = NULL;
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+
+    if (p_getaddrinfo(host.c_str(), isHttps ? "443" : "80", &hints, &res) !=
+        0) {
+      return INVALID_SOCKET;
+    }
+
+    SOCKET sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if (sock == INVALID_SOCKET) {
+      p_freeaddrinfo(res);
+      return INVALID_SOCKET;
+    }
+
+    if (connect(sock, res->ai_addr, (int)res->ai_addrlen) == SOCKET_ERROR) {
+      closesocket(sock);
+      p_freeaddrinfo(res);
+      return INVALID_SOCKET;
+    }
+    p_freeaddrinfo(res);
+    return sock;
+  } else {
+    // Legacy (Win2k) Path using gethostbyname (IPv4 only)
+    struct hostent *he = gethostbyname(host.c_str());
+    if (!he)
+      return INVALID_SOCKET;
+
+    struct sockaddr_in addr;
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(isHttps ? 443 : 80);
+    addr.sin_addr = *((struct in_addr *)he->h_addr);
+    memset(&(addr.sin_zero), 0, 8);
+
+    SOCKET sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock == INVALID_SOCKET)
+      return INVALID_SOCKET;
+
+    if (connect(sock, (struct sockaddr *)&addr, sizeof(struct sockaddr)) ==
+        SOCKET_ERROR) {
+      closesocket(sock);
+      return INVALID_SOCKET;
+    }
+    return sock;
+  }
+}
+
 // Helper for both API requests and File Downloads
 // returns true if success
 bool PerformRequest(const string &urlStr, const string &method,
@@ -162,30 +232,11 @@ bool PerformRequest(const string &urlStr, const string &method,
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
       return false;
 
-    struct addrinfo hints = {0}, *res = NULL;
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_protocol = IPPROTO_TCP;
-
-    if (getaddrinfo(host.c_str(), isHttps ? "443" : "80", &hints, &res) != 0) {
-      WSACleanup();
-      return false;
-    }
-
-    SOCKET sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    SOCKET sock = ConnectToHost(host, isHttps);
     if (sock == INVALID_SOCKET) {
-      freeaddrinfo(res);
       WSACleanup();
       return false;
     }
-
-    if (connect(sock, res->ai_addr, (int)res->ai_addrlen) == SOCKET_ERROR) {
-      closesocket(sock);
-      freeaddrinfo(res);
-      WSACleanup();
-      return false;
-    }
-    freeaddrinfo(res);
 
     SSL_CTX *ctx = NULL;
     SSL *ssl = NULL;
@@ -1126,6 +1177,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                    LPSTR lpCmdLine, int nCmdShow) {
   EnableDPI();
   InitCommonControls();
+  LoadNetworking();
 
   // Load XP-only console functions dynamically
   HMODULE hKernel32 = GetModuleHandle(L"kernel32.dll");
@@ -1149,12 +1201,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
   }
 
   // Smart Console Handling for -mconsole builds:
-  // If we are in GUI mode (no args) but have a console, check if we own it.
+  // IF we are in GUI mode (no args) but have a console, check if we own it.
   // If we are the only process in the console list, it was created for us
   // (double-click). We should FreeConsole() to hide it throughout the GUI
   // session.
-  // WIN2K FALLBACK: If API missing, just skip this (console remains open on 2k
-  // if compiled with -mconsole)
+  // WIN2K FALLBACK: If API missing, just skip this (console remains open on
+  // 2k if compiled with -mconsole)
   if (nArgs <= 1 && pGetConsoleProcessList) {
     DWORD pidList[2];
     DWORD num = pGetConsoleProcessList(pidList, 2);
@@ -1169,11 +1221,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     else if (IsValidFidoFlag(argvW[1]))
       cliMode = true;
     else {
-      // For GUI app, we might want to just show a messagebox or ignore invalid
-      // args instead of printing to non-existent console
+      // For GUI app, we might want to just show a messagebox or ignore
+      // invalid args instead of printing to non-existent console
       if (pAttachConsole && pAttachConsole(ATTACH_PARENT_PROCESS)) {
-        FILE *fDummy;
-        freopen_s(&fDummy, "CONOUT$", "w", stdout);
+        freopen("CONOUT$", "w", stdout);
         wcout << L"Error: Invalid arguments provided: " << argvW[1] << endl;
       }
       return 1;
@@ -1189,8 +1240,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     bool created = false;
 
     // If attach failed, we might need a new console.
-    // However, if we were launched via -mconsole, we already have one attached!
-    // AttachConsole fails with ERROR_ACCESS_DENIED if we are already attached.
+    // However, if we were launched via -mconsole, we already have one
+    // attached! AttachConsole fails with ERROR_ACCESS_DENIED if we are
+    // already attached.
     if (!attached) {
       bool alreadyAttached = false;
       if (pAttachConsole && GetLastError() == ERROR_ACCESS_DENIED) {
@@ -1206,10 +1258,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 
     // Redirect streams unconditionally (whether we attached, created, or
     // already had one)
-    FILE *fDummy;
-    freopen_s(&fDummy, "CONOUT$", "w", stdout);
-    freopen_s(&fDummy, "CONOUT$", "w", stderr);
-    freopen_s(&fDummy, "CONIN$", "r", stdin);
+    freopen("CONOUT$", "w", stdout);
+    freopen("CONOUT$", "w", stderr);
+    freopen("CONIN$", "r", stdin);
 
     std::ios::sync_with_stdio(true);
 
