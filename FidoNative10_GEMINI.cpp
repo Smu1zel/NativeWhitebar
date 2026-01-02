@@ -7,11 +7,10 @@
  * g++ WhitebarNative.cpp -o Whitebar.exe -mconsole -mwindows -static -lssl
  * -lcrypto -lws2_32 -lcomctl32 -lgdi32 -lole32 -lrpcrt4 -lcrypt32 -lcomdlg32
  */
-
 #define UNICODE
 #define _UNICODE
-#define _WIN32_IE 0x0600
-#define _WIN32_WINNT 0x0501 // Target Windows XP
+#define _WIN32_IE 0x0500
+#define _WIN32_WINNT 0x0500 // Target Windows XP
 
 // FIX: Winsock2 headers MUST be included before windows.h
 #include <winsock2.h>
@@ -39,6 +38,9 @@
 // OpenSSL Headers
 #include <openssl/err.h>
 #include <openssl/ssl.h>
+
+#undef freopen_s
+#define freopen_s(pf, fn, mode, stream) ((*(pf)=freopen((fn),(mode),(stream)))?0:errno)
 
 // Link against system libraries (MinGW specific pragma)
 #pragma comment(lib, "ws2_32")
@@ -1116,10 +1118,22 @@ bool IsValidFidoFlag(const wchar_t *arg) {
   return false;
 }
 
+// Helper types for dynamic loading of XP+ console functions
+typedef BOOL(WINAPI *AttachConsole_t)(DWORD);
+typedef DWORD(WINAPI *GetConsoleProcessList_t)(LPDWORD, DWORD);
+
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                    LPSTR lpCmdLine, int nCmdShow) {
   EnableDPI();
   InitCommonControls();
+
+  // Load XP-only console functions dynamically
+  HMODULE hKernel32 = GetModuleHandle(L"kernel32.dll");
+  AttachConsole_t pAttachConsole =
+      (AttachConsole_t)GetProcAddress(hKernel32, "AttachConsole");
+  GetConsoleProcessList_t pGetConsoleProcessList =
+      (GetConsoleProcessList_t)GetProcAddress(hKernel32,
+                                              "GetConsoleProcessList");
 
   int nArgs;
   LPWSTR *argvW = CommandLineToArgvW(GetCommandLineW(), &nArgs);
@@ -1139,9 +1153,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
   // If we are the only process in the console list, it was created for us
   // (double-click). We should FreeConsole() to hide it throughout the GUI
   // session.
-  if (nArgs <= 1) {
+  // WIN2K FALLBACK: If API missing, just skip this (console remains open on 2k
+  // if compiled with -mconsole)
+  if (nArgs <= 1 && pGetConsoleProcessList) {
     DWORD pidList[2];
-    DWORD num = GetConsoleProcessList(pidList, 2);
+    DWORD num = pGetConsoleProcessList(pidList, 2);
     if (num == 1) {
       FreeConsole();
     }
@@ -1155,7 +1171,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     else {
       // For GUI app, we might want to just show a messagebox or ignore invalid
       // args instead of printing to non-existent console
-      if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+      if (pAttachConsole && pAttachConsole(ATTACH_PARENT_PROCESS)) {
         FILE *fDummy;
         freopen_s(&fDummy, "CONOUT$", "w", stdout);
         wcout << L"Error: Invalid arguments provided: " << argvW[1] << endl;
@@ -1165,14 +1181,25 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
   }
 
   if (cliMode) {
-    bool attached = AttachConsole(ATTACH_PARENT_PROCESS);
+    bool attached = false;
+    if (pAttachConsole) {
+      attached = pAttachConsole(ATTACH_PARENT_PROCESS);
+    }
+
     bool created = false;
 
     // If attach failed, we might need a new console.
     // However, if we were launched via -mconsole, we already have one attached!
     // AttachConsole fails with ERROR_ACCESS_DENIED if we are already attached.
     if (!attached) {
-      if (GetLastError() != ERROR_ACCESS_DENIED) {
+      bool alreadyAttached = false;
+      if (pAttachConsole && GetLastError() == ERROR_ACCESS_DENIED) {
+        alreadyAttached = true;
+      }
+      // On Win2k, pAttachConsole is null, so we assume we have no parent
+      // console to attach to. But we might be in -mconsole mode? Just try
+      // AllocConsole if we don't think we are attached.
+      if (!alreadyAttached) {
         created = AllocConsole();
       }
     }
