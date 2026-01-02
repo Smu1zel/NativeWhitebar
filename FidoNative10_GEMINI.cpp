@@ -14,10 +14,18 @@
 #define _WIN32_WINNT 0x0501 // Target Windows XP
 
 // FIX: Winsock2 headers MUST be included before windows.h
-#include <algorithm>
-#include <atomic>
+#include <winsock2.h>
+
+#include <windows.h>
+
 #include <commctrl.h>
 #include <commdlg.h> // Save File Dialog
+
+#include <winsock2.h>
+#include <ws2tcpip.h>
+
+#include <algorithm>
+#include <atomic>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -27,15 +35,10 @@
 #include <string>
 #include <thread>
 #include <vector>
-#include <windows.h>
-#include <winsock2.h>
-#include <ws2tcpip.h>
-
 
 // OpenSSL Headers
 #include <openssl/err.h>
 #include <openssl/ssl.h>
-
 
 // Link against system libraries (MinGW specific pragma)
 #pragma comment(lib, "ws2_32")
@@ -863,6 +866,10 @@ int GetSelection(size_t max) {
     wcout << L"Select [0-" << max - 1 << L"]: ";
     if (wcin >> sel && sel >= 0 && sel < (int)max)
       return sel;
+
+    if (wcin.fail() && wcin.eof())
+      return 0; // Failsafe for broken pipe
+
     wcout << L"Invalid selection. Try again." << endl;
     wcin.clear();
     wcin.ignore(10000, '\n');
@@ -1127,6 +1134,19 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     }
   }
 
+  // Smart Console Handling for -mconsole builds:
+  // If we are in GUI mode (no args) but have a console, check if we own it.
+  // If we are the only process in the console list, it was created for us
+  // (double-click). We should FreeConsole() to hide it throughout the GUI
+  // session.
+  if (nArgs <= 1) {
+    DWORD pidList[2];
+    DWORD num = GetConsoleProcessList(pidList, 2);
+    if (num == 1) {
+      FreeConsole();
+    }
+  }
+
   if (nArgs > 1) {
     if (lstrcmpiW(argvW[1], L"--cli") == 0 || lstrcmpiW(argvW[1], L"/cli") == 0)
       cliMode = true;
@@ -1145,11 +1165,40 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
   }
 
   if (cliMode) {
-    if (AttachConsole(ATTACH_PARENT_PROCESS) || AllocConsole()) {
-      FILE *fDummy;
-      freopen_s(&fDummy, "CONOUT$", "w", stdout);
-      freopen_s(&fDummy, "CONIN$", "r", stdin);
-      RunCLI(nArgs, argvW, useBrowser);
+    bool attached = AttachConsole(ATTACH_PARENT_PROCESS);
+    bool created = false;
+
+    // If attach failed, we might need a new console.
+    // However, if we were launched via -mconsole, we already have one attached!
+    // AttachConsole fails with ERROR_ACCESS_DENIED if we are already attached.
+    if (!attached) {
+      if (GetLastError() != ERROR_ACCESS_DENIED) {
+        created = AllocConsole();
+      }
+    }
+
+    // Redirect streams unconditionally (whether we attached, created, or
+    // already had one)
+    FILE *fDummy;
+    freopen_s(&fDummy, "CONOUT$", "w", stdout);
+    freopen_s(&fDummy, "CONOUT$", "w", stderr);
+    freopen_s(&fDummy, "CONIN$", "r", stdin);
+
+    std::ios::sync_with_stdio(true);
+
+    // Clear stream states to ensure they use the new handles
+    std::wcout.clear();
+    std::cout.clear();
+    std::wcerr.clear();
+    std::cerr.clear();
+
+    RunCLI(nArgs, argvW, useBrowser);
+
+    // Pause ONLY if we created a new window.
+    if (created && !useBrowser) {
+      wcout << L"\nPress Enter to exit..." << endl;
+      wcin.ignore();
+      wcin.get();
     }
     return 0;
   }
@@ -1180,4 +1229,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     DispatchMessage(&msg);
   }
   return (int)msg.wParam;
+}
+
+// Wrapper for -mconsole users
+int main() {
+  return WinMain(GetModuleHandle(NULL), NULL, GetCommandLineA(), SW_SHOWNORMAL);
 }
