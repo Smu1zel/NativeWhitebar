@@ -782,7 +782,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
     // Checkbox
     hCheckDl = CreateWindow(
-        L"BUTTON", L"Download to Disk",
+        L"BUTTON", L"Download within app",
         WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP, marginX, currentY,
         Scale(200, s), Scale(20, s), hWnd, (HMENU)ID_CHECK_DL, NULL, NULL);
     SendMessage(hCheckDl, WM_SETFONT, (WPARAM)hFont, TRUE);
@@ -1310,7 +1310,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
   HWND hWnd = CreateWindow(L"WhitebarNativeClass", L"Whitebar (Native)",
                            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU |
                                WS_MINIMIZEBOX | WS_VISIBLE,
-                           100, 100, Scale(400, s), Scale(630, s), NULL, NULL,
+                           100, 100, Scale(400, s), Scale(450, s), NULL, NULL,
                            GetModuleHandle(NULL), NULL);
 
   MSG msg;
