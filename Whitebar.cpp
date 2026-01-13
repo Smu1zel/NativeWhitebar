@@ -1,21 +1,13 @@
 /*
- * WhitebarNative.cpp - Single File C++ Port of Whitebar (XP Compatible /
- * OpenSSL)
- * * Dependencies: MSYS2 OpenSSL
- * pacman -S mingw-w64-x86_64-openssl (or mingw-w64-i686-openssl for 32-bit XP)
- * * Compile with MSYS2/MinGW64:
- * g++ -I/c/Users/Lynden/Downloads/openssl/include
- * -L/c/Users/Lynden/Downloads/openssl FidoNative10_GEMINI.cpp -o WhitebarNative.exe
- * -mconsole -mwindows -static -lssl -lcrypto -lws2_32 -lcomctl32 -lgdi32
- * -lole32 -lrpcrt4 -lcrypt32 -mno-mmx -mno-sse -mno-sse2 -lcomdlg32
+ * Whitebar.cpp - Single File C++ Port of Whitebar (XP Compatible / OpenSSL)
  */
 #ifdef _WIN32
 #define UNICODE
 #define _UNICODE
 #define _WIN32_IE 0x0500
-#define _WIN32_WINNT 0x0500 // Target Windows XP
+#define _WIN32_WINNT 0x0500 // Target Windows 2000
 
-// FIX: Winsock2 headers MUST be included before windows.h
+// Winsock2 headers MUST be included before windows.h
 #include <winsock2.h>
 #include <windows.h>
 #include <commctrl.h>
@@ -483,7 +475,6 @@ wstring GenerateGuid() {
 #endif
 }
 
-// Simple JSON Parsing
 // Simple JSON Parsing (Regex)
 string ExtractJsonValue(const string &json, const string &key) {
   try {
@@ -1466,7 +1457,7 @@ void RunCLI(int argc, LPWSTR *argv, bool useBrowser) {
   }
 }
 
-bool IsValidFidoFlag(const wchar_t *arg) {
+bool IsValidWhitebarFlag(const wchar_t *arg) {
   if (!arg)
     return false;
   const wchar_t *key = arg;
@@ -1537,7 +1528,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
   if (nArgs > 1) {
     if (lstrcmpiW(argvW[1], L"--cli") == 0 || lstrcmpiW(argvW[1], L"/cli") == 0)
       cliMode = true;
-    else if (IsValidFidoFlag(argvW[1]))
+    else if (IsValidWhitebarFlag(argvW[1]))
       cliMode = true;
     else {
       // For GUI app, we might want to just show a messagebox or ignore
