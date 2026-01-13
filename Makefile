@@ -37,5 +37,6 @@ clean:
 
 # Linux Target
 linux:
-	$(CXX) Whitebar.cpp -o whitebar_linux `fltk-config --cxxflags` `fltk-config --ldstaticflags` -lssl -lcrypto -lpthread -ldl -s
+	$(CXX) Whitebar.cpp -o whitebar_linux `fltk-config --cxxflags` `fltk-config --ldstaticflags` -Wl,-Bstatic -lssl -lcrypto -Wl,-Bdynamic -lpthread -ldl -s
+
 
