@@ -33,4 +33,9 @@ $(TARGET): $(OBJ)
 
 # Clean
 clean:
-	rm -f $(OBJ) $(TARGET)
+	rm -f $(OBJ) $(TARGET) whitebar_linux
+
+# Linux Target
+linux:
+	$(CXX) Whitebar.cpp -o whitebar_linux `fltk-config --cxxflags` `fltk-config --ldstaticflags` -lssl -lcrypto -lpthread -ldl -s
+

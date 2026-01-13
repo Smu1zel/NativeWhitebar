@@ -9,6 +9,7 @@
  * -mconsole -mwindows -static -lssl -lcrypto -lws2_32 -lcomctl32 -lgdi32
  * -lole32 -lrpcrt4 -lcrypt32 -mno-mmx -mno-sse -mno-sse2 -lcomdlg32
  */
+#ifdef _WIN32
 #define UNICODE
 #define _UNICODE
 #define _WIN32_IE 0x0500
@@ -16,14 +17,62 @@
 
 // FIX: Winsock2 headers MUST be included before windows.h
 #include <winsock2.h>
-
 #include <windows.h>
-
 #include <commctrl.h>
 #include <commdlg.h> // Save File Dialog
-
-#include <winsock2.h>
 #include <ws2tcpip.h>
+
+#pragma comment(lib, "ws2_32")
+#pragma comment(lib, "comctl32")
+#pragma comment(lib, "user32")
+#pragma comment(lib, "gdi32")
+#pragma comment(lib, "rpcrt4")
+#pragma comment(lib, "comdlg32")
+
+#else // Linux / FLTK
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <fcntl.h>
+#include <errno.h>
+
+#include <FL/Fl.H>
+#include <FL/Fl_Window.H>
+#include <FL/Fl_Choice.H>
+#include <FL/Fl_Button.H>
+#include <FL/Fl_Check_Button.H>
+#include <FL/Fl_Box.H>
+#include <FL/Fl_Progress.H>
+#include <FL/Fl_Native_File_Chooser.H>
+#include <FL/fl_ask.H>
+
+// Cross-platform Compatibility Mappings
+#define INVALID_SOCKET -1
+#define SOCKET_ERROR -1
+#define closesocket close
+#define WSACleanup() ((void)0)
+typedef int SOCKET;
+typedef struct sockaddr_in SOCKADDR_IN;
+typedef struct sockaddr SOCKADDR;
+typedef struct in_addr IN_ADDR;
+
+// Ignore Windows-specific types on Linux
+#define WINAPI
+#define LPSTR char*
+#define LPWSTR wchar_t*
+#define HINSTANCE void*
+#define HMODULE void*
+#define BOOL int
+#define DWORD unsigned long
+#define LPDWORD unsigned long*
+#define TRUE 1
+#define FALSE 0
+#define CP_UTF8 65001
+
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -40,18 +89,6 @@
 // OpenSSL Headers
 #include <openssl/err.h>
 #include <openssl/ssl.h>
-/*
-#undef freopen_s
-#define freopen_s(pf, fn, mode, stream)                                        \
-  ((*(pf) = freopen((fn), (mode), (stream))) ? 0 : errno)
-*/
-// Link against system libraries (MinGW specific pragma)
-#pragma comment(lib, "ws2_32")
-#pragma comment(lib, "comctl32")
-#pragma comment(lib, "user32")
-#pragma comment(lib, "gdi32")
-#pragma comment(lib, "rpcrt4")
-#pragma comment(lib, "comdlg32")
 
 using namespace std;
 
@@ -88,30 +125,52 @@ std::atomic<bool> g_appRunning(true);
 typedef void (*ProgressCallback)(int percent);
 
 // Simple string conversions
+// Simple string conversions
 wstring ToWString(const string &s) {
   if (s.empty())
     return L"";
+#ifdef _WIN32
   int size_needed =
       MultiByteToWideChar(CP_UTF8, 0, &s[0], (int)s.size(), NULL, 0);
   wstring wstrTo(size_needed, 0);
   MultiByteToWideChar(CP_UTF8, 0, &s[0], (int)s.size(), &wstrTo[0],
                       size_needed);
   return wstrTo;
+#else
+  // Linux UTF-8 to WString (basic implementation)
+  // Note: wchar_t on Linux is 32-bit (UTF-32), on Windows 16-bit (UTF-16)
+  // Since we use wstring mostly for internal logic, this is acceptable.
+  size_t len = mbstowcs(NULL, s.c_str(), 0);
+  if (len == (size_t)-1) return L"";
+  wstring ret(len, 0);
+  mbstowcs(&ret[0], s.c_str(), len);
+  return ret;
+#endif
 }
 
 string ToString(const wstring &w) {
   if (w.empty())
     return "";
+#ifdef _WIN32
   int size_needed = WideCharToMultiByte(CP_UTF8, 0, &w[0], (int)w.size(), NULL,
                                         0, NULL, NULL);
   string strTo(size_needed, 0);
   WideCharToMultiByte(CP_UTF8, 0, &w[0], (int)w.size(), &strTo[0], size_needed,
                       NULL, NULL);
   return strTo;
+#else
+  // Linux WString to UTF-8
+  size_t len = wcstombs(NULL, w.c_str(), 0);
+  if (len == (size_t)-1) return "";
+  string ret(len, 0);
+  wcstombs(&ret[0], w.c_str(), len);
+  return ret;
+#endif
 }
 
 // XP-Safe DPI Awareness
 void EnableDPI() {
+#ifdef _WIN32
   HMODULE hUser32 = LoadLibraryA("user32.dll");
   if (hUser32) {
     typedef BOOL(WINAPI * SetProcessDPIAware_t)();
@@ -121,6 +180,7 @@ void EnableDPI() {
       pSetProcessDPIAware();
     FreeLibrary(hUser32);
   }
+#endif
 }
 
 // ==========================================
@@ -147,6 +207,7 @@ bool ParseUrl(const string &url, string &host, string &path, bool &isHttps) {
 }
 
 // Helper types for dynamic loading of XP+ networking functions (getaddrinfo)
+#ifdef _WIN32
 typedef int(WSAAPI *getaddrinfo_t)(const char *, const char *,
                                    const struct addrinfo *, struct addrinfo **);
 typedef void(WSAAPI *freeaddrinfo_t)(struct addrinfo *);
@@ -161,6 +222,12 @@ void LoadNetworking() {
     p_freeaddrinfo = (freeaddrinfo_t)GetProcAddress(hWs2, "freeaddrinfo");
   }
 }
+#else
+// Linux: Use standard functions directly
+#define p_getaddrinfo getaddrinfo
+#define p_freeaddrinfo freeaddrinfo
+void LoadNetworking() {}
+#endif
 
 // Win2k Compatible Host Resolution
 // Returns a socket connected to the host/port
@@ -230,9 +297,11 @@ bool PerformRequest(const string &urlStr, const string &method,
     if (!ParseUrl(currentUrl, host, path, isHttps))
       return false;
 
+#ifdef _WIN32
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
       return false;
+#endif
 
     SOCKET sock = ConnectToHost(host, isHttps);
     if (sock == INVALID_SOCKET) {
@@ -289,7 +358,6 @@ bool PerformRequest(const string &urlStr, const string &method,
       if (headers.length() >= 4 &&
           headers.substr(headers.length() - 4) == "\r\n\r\n") {
         headerDone = true;
-        break;
       }
     }
 
@@ -297,16 +365,11 @@ bool PerformRequest(const string &urlStr, const string &method,
       return false;
     }
 
-    // Parse Status Code
+    // Parse Status Code (simplistic)
     int statusCode = 0;
     size_t firstSpace = headers.find(" ");
     if (firstSpace != string::npos) {
-      size_t secondSpace = headers.find(" ", firstSpace + 1);
-      if (secondSpace != string::npos) {
-        statusCode =
-            atoi(headers.substr(firstSpace + 1, secondSpace - firstSpace - 1)
-                     .c_str());
-      }
+      statusCode = atoi(headers.substr(firstSpace + 1, 3).c_str());
     }
 
     // Handle Redirects
@@ -333,13 +396,21 @@ bool PerformRequest(const string &urlStr, const string &method,
 
     // Handle Body
     if (downloadToFile) {
+#ifdef _WIN32
       ofstream outfile(filePath.c_str(), ios::binary);
+#else
+      ofstream outfile(ToString(filePath), ios::binary);
+#endif
 
       // Get Content-Length for progress
       long long totalSize = 0;
       size_t clPos = headers.find("\nContent-Length: ");
       if (clPos != string::npos) {
+#ifdef _WIN32
         totalSize = _atoi64(headers.substr(clPos + 17).c_str());
+#else
+        totalSize = atoll(headers.substr(clPos + 17).c_str());
+#endif
       }
 
       char chunk[8192];
@@ -394,7 +465,9 @@ string MakeRequest(const wstring &url, const wstring &referer = L"") {
 }
 
 // UUID Helper
+// UUID Helper
 wstring GenerateGuid() {
+#ifdef _WIN32
   UUID uuid;
   UuidCreate(&uuid);
   RPC_WSTR str;
@@ -402,6 +475,12 @@ wstring GenerateGuid() {
   wstring ret = (wchar_t *)str;
   RpcStringFree(&str);
   return ret;
+#else
+  ifstream in("/proc/sys/kernel/random/uuid");
+  string s;
+  if(in) getline(in, s);
+  return ToWString(s);
+#endif
 }
 
 // Simple JSON Parsing
@@ -621,6 +700,14 @@ public:
 // 2. GUI Logic
 // ==========================================
 
+WhitebarClient client;
+vector<WindowsRelease> g_releases;
+vector<WindowsEdition> g_editions;
+vector<WindowsLanguage> g_languages;
+vector<DownloadLink> g_links;
+
+#ifdef _WIN32
+
 #define ID_COMBO_VER 101
 #define ID_COMBO_REL 102
 #define ID_COMBO_ED 103
@@ -632,11 +719,6 @@ public:
 #define WM_DATA_READY (WM_USER + 1)
 #define WM_DOWNLOAD_DONE (WM_USER + 2)
 
-WhitebarClient client;
-vector<WindowsRelease> g_releases;
-vector<WindowsEdition> g_editions;
-vector<WindowsLanguage> g_languages;
-vector<DownloadLink> g_links;
 HWND hCombos[5];
 HWND hBtnDownload, hStatus, hCheckDl, hProgress;
 HFONT hFont;
@@ -920,6 +1002,221 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
   }
   return DefWindowProc(hWnd, msg, wParam, lParam);
 }
+#endif
+
+#ifndef _WIN32 // Linux / FLTK Implementation
+
+Fl_Window *win;
+Fl_Choice *cVer, *cRel, *cEd, *cLang, *cArch;
+Fl_Check_Button *chkDl;
+Fl_Button *btnDownload;
+Fl_Box *status;
+Fl_Progress *progress;
+
+void SetStatus(const char *txt) {
+  status->copy_label(txt);
+  status->redraw();
+}
+
+void CliProgressCallback(int percent) {
+  int barWidth = 30;
+  cout << "\r[";
+  int pos = barWidth * percent / 100;
+  for (int i = 0; i < barWidth; ++i) {
+    if (i < pos)
+      cout << "=";
+    else if (i == pos)
+      cout << ">";
+    else
+      cout << " ";
+  }
+  cout << "] " << percent << " % " << flush;
+}
+
+void GuiProgressCallback(int percent) {
+  Fl::lock();
+  if (progress) {
+    progress->value(percent);
+    progress->redraw();
+    Fl::check(); // Force event loop to process updates
+  }
+  Fl::unlock();
+  Fl::awake();
+}
+
+void PopulateCombo(Fl_Choice *c, const vector<wstring> &items) {
+  c->clear();
+  for (const auto &item : items) {
+    string str = ToString(item);
+    // Escape slashes for FLTK menus
+    size_t pos = 0;
+    while((pos = str.find("/", pos)) != string::npos) {
+        str.replace(pos, 1, "\\/");
+        pos += 2;
+    }
+    c->add(str.c_str());
+  }
+  c->value(-1); // No selection
+}
+
+void ResetCombos(int startIdx) {
+  if (startIdx <= 1) {
+    cRel->clear();
+    cRel->deactivate();
+  }
+  if (startIdx <= 2) {
+    cEd->clear();
+    cEd->deactivate();
+  }
+  if (startIdx <= 3) {
+    cLang->clear();
+    cLang->deactivate();
+  }
+  if (startIdx <= 4) {
+    cArch->clear();
+    cArch->deactivate();
+  }
+  btnDownload->deactivate();
+}
+
+void DataReadyCallback(void *data) {
+  long type = (long)data;
+  if (type == 1) { // Langs ready
+    vector<wstring> names;
+    for (const auto &l : g_languages)
+      names.push_back(l.DisplayName);
+    PopulateCombo(cLang, names);
+    
+    cVer->activate(); cRel->activate(); cEd->activate(); // Re-enable parents
+    cLang->activate();
+    cLang->redraw();
+    SetStatus("Select Language.");
+  } else if (type == 2) { // Links ready
+    vector<wstring> archs;
+    for (const auto &l : g_links)
+      archs.push_back(l.Architecture);
+    PopulateCombo(cArch, archs);
+    
+    // Auto-select if mostly one
+    if (archs.size() == 1) {
+       cArch->value(0);
+       btnDownload->activate();
+       SetStatus("Ready to Download.");
+    } else {
+       SetStatus("Select Architecture.");
+    }
+
+    cVer->activate(); cRel->activate(); cEd->activate(); 
+    cLang->activate(); // Re-enable everything
+    cArch->activate();
+    cArch->redraw();
+  }
+}
+
+void DownloadDoneCallback(void *data) {
+  long success = (long)data;
+  btnDownload->activate();
+  chkDl->activate();
+  cVer->activate(); cRel->activate(); cEd->activate(); cLang->activate(); cArch->activate();
+  SetStatus(success ? "Download Complete!" : "Download Failed.");
+  progress->value(0);
+  fl_message(success ? "Download completed successfully." : "Download failed. Check internet connection.");
+}
+
+void OnVerChanged(Fl_Widget *, void *) {
+  int idx = cVer->value();
+  if (idx < 0) return;
+  ResetCombos(1);
+  g_releases = client.Versions[idx].Releases;
+  vector<wstring> names;
+  for (const auto &r : g_releases)
+    names.push_back(r.Name);
+  PopulateCombo(cRel, names);
+  cRel->activate();
+  cRel->redraw();
+}
+
+void OnRelChanged(Fl_Widget *, void *) {
+  int idx = cRel->value();
+  if (idx < 0) return;
+  ResetCombos(2);
+  g_editions = g_releases[idx].Editions;
+  vector<wstring> names;
+  for (const auto &e : g_editions)
+    names.push_back(e.Name);
+  PopulateCombo(cEd, names);
+  cEd->activate();
+  cEd->redraw();
+}
+
+void OnEdChanged(Fl_Widget *, void *) {
+  int verIdx = cVer->value();
+  int edIdx = cEd->value();
+  if (verIdx < 0 || edIdx < 0) return;
+  ResetCombos(3);
+  SetStatus("Fetching Languages...");
+  cVer->deactivate(); cRel->deactivate(); cEd->deactivate();
+  
+  thread([=]() {
+    g_languages =
+        client.GetLanguages(client.Versions[verIdx], g_editions[edIdx]);
+    Fl::awake(DataReadyCallback, (void *)(long)1);
+  }).detach();
+}
+
+void OnLangChanged(Fl_Widget *, void *) {
+  int verIdx = cVer->value();
+  int relIdx = cRel->value();
+  int edIdx = cEd->value();
+  int langIdx = cLang->value();
+  if (langIdx < 0) return;
+  ResetCombos(4);
+  SetStatus("Fetching Links...");
+  cLang->deactivate();
+  
+  thread([=]() {
+    g_links = client.GetDownloadLinks(g_languages[langIdx],
+                                      client.Versions[verIdx],
+                                      g_releases[relIdx], g_editions[edIdx]);
+    Fl::awake(DataReadyCallback, (void *)(long)2);
+  }).detach();
+}
+
+void OnDownloadClicked(Fl_Widget*, void*) {
+    int idx = cArch->value();
+    if(idx < 0 || idx >= (int)g_links.size()) return;
+    
+    // Check Download to Disk
+    if (chkDl->value()) {
+        Fl_Native_File_Chooser fnfc;
+        fnfc.title("Save ISO");
+        fnfc.type(Fl_Native_File_Chooser::BROWSE_SAVE_FILE);
+        fnfc.filter("ISO Files\t*.iso\nAll Files\t*");
+        fnfc.preset_file("Windows.iso");
+        switch(fnfc.show()) {
+            case -1: break; // Error
+            case 1: break; // Cancel
+            default: {
+                string filePath = fnfc.filename();
+                btnDownload->deactivate();
+                chkDl->deactivate();
+                cVer->deactivate(); cRel->deactivate(); cEd->deactivate(); cLang->deactivate(); cArch->deactivate();
+                SetStatus("Downloading... Please wait.");
+                string url = ToString(g_links[idx].Url);
+                thread([=]() {
+                     string dummy;
+                     bool success = PerformRequest(url, "GET", "", dummy, true, ToWString(filePath), GuiProgressCallback);
+                     Fl::awake(DownloadDoneCallback, (void*)(long)(success ? 1 : 0));
+                }).detach();
+            }
+        }
+    } else {
+        string url = ToString(g_links[idx].Url);
+        string cmd = "xdg-open \"" + url + "\"";
+        system(cmd.c_str());
+    }
+}
+#endif
 
 // ==========================================
 // 3. Entry Point & CLI
@@ -1134,7 +1431,12 @@ void RunCLI(int argc, LPWSTR *argv, bool useBrowser) {
     } else {
       wcout << L"Opening browser..." << endl;
     }
+#ifdef _WIN32
     ShellExecuteW(NULL, L"open", link->Url.c_str(), NULL, NULL, SW_SHOWNORMAL);
+#else
+    string cmd = "xdg-open \"" + ToString(link->Url) + "\"";
+    system(cmd.c_str());
+#endif
   } else {
     // Direct Download
     string url = ToString(link->Url);
@@ -1175,13 +1477,18 @@ bool IsValidFidoFlag(const wchar_t *arg) {
   const wchar_t *valid[] = {L"win",  L"rel",    L"ed",         L"lang",
                             L"arch", L"geturl", L"use-browser"};
   for (const auto &v : valid) {
+#ifdef _WIN32
     if (lstrcmpiW(key, v) == 0)
+#else
+    if (wcscasecmp(key, v) == 0)
+#endif
       return true;
   }
   return false;
 }
 
 // Helper types for dynamic loading of XP+ console functions
+#ifdef _WIN32
 typedef BOOL(WINAPI *AttachConsole_t)(DWORD);
 typedef DWORD(WINAPI *GetConsoleProcessList_t)(LPDWORD, DWORD);
 
@@ -1325,3 +1632,98 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 int main() {
   return WinMain(GetModuleHandle(NULL), NULL, GetCommandLineA(), SW_SHOWNORMAL);
 }
+#else
+int main(int argc, char **argv) {
+  // CLI Check
+  bool cli = false;
+  for (int i = 1; i < argc; i++) {
+    string s = argv[i];
+    if (s == "--cli" || s == "/cli")
+      cli = true;
+  }
+
+  if (cli) {
+    vector<wstring> argsStorage;
+    vector<wchar_t *> argsW;
+    // Program name
+    argsStorage.push_back(ToWString(argv[0]));
+    argsW.push_back((wchar_t *)argsStorage[0].c_str());
+
+    for (int i = 1; i < argc; i++) {
+      argsStorage.push_back(ToWString(argv[i]));
+      argsW.push_back((wchar_t *)argsStorage.back().c_str());
+    }
+
+    bool useBrowser = false;
+    for (int i = 1; i < argc; i++) {
+      string s = argv[i];
+      if (s == "--use-browser" || s == "/use-browser")
+        useBrowser = true;
+    }
+
+    RunCLI(argc, argsW.data(), useBrowser);
+    return 0;
+  }
+
+  Fl::scheme("gtk+");
+  win = new Fl_Window(400, 630, "Whitebar (Linux)");
+
+  int mx = 20;
+  int cy = 10;
+  int w = 340;
+  int h = 25;
+
+  auto make_combo = [&](const char *label, Fl_Choice *&c) {
+    (new Fl_Box(FL_NO_BOX, mx, cy, w, 20, label))
+        ->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+    cy += 20;
+    c = new Fl_Choice(mx, cy, w, h);
+    cy += 35;
+  };
+
+  make_combo("Windows Version:", cVer);
+  cVer->callback(OnVerChanged);
+
+  make_combo("Release:", cRel);
+  cRel->callback(OnRelChanged);
+  cRel->deactivate();
+
+  make_combo("Edition:", cEd);
+  cEd->callback(OnEdChanged);
+  cEd->deactivate();
+
+  make_combo("Language:", cLang);
+  cLang->callback(OnLangChanged);
+  cLang->deactivate();
+
+  make_combo("Architecture:", cArch);
+  cArch->callback([](Fl_Widget *, void *) { btnDownload->activate(); });
+  cArch->deactivate();
+
+  chkDl = new Fl_Check_Button(mx, cy, w, h, "Download within app");
+  cy += 30;
+
+  btnDownload = new Fl_Button(mx, cy, w, 30, "Download");
+  btnDownload->callback(OnDownloadClicked);
+  btnDownload->deactivate();
+  cy += 40;
+
+  status = new Fl_Box(FL_NO_BOX, mx, cy, w, 20, "Ready");
+  status->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+  cy += 25;
+
+  progress = new Fl_Progress(mx, cy, w, 20);
+
+  win->end();
+  win->show(argc, argv);
+
+  // Init Data
+  vector<wstring> verNames;
+  for (const auto &v : client.Versions)
+    verNames.push_back(v.Name);
+  PopulateCombo(cVer, verNames);
+
+  Fl::lock();
+  return Fl::run();
+}
+#endif
