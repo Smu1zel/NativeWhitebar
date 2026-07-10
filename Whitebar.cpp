@@ -74,6 +74,7 @@ typedef struct in_addr IN_ADDR;
 #include <map>
 #include <regex>
 #include <sstream>
+#include <chrono>
 #include <string>
 #include <thread>
 #include <vector>
@@ -90,7 +91,7 @@ using namespace std;
 
 struct WindowsEdition {
   wstring Name;
-  int Id;
+  vector<int> Ids;
 };
 struct WindowsRelease {
   wstring Name;
@@ -350,6 +351,7 @@ bool PerformRequest(const string &urlStr, const string &method,
       if (headers.length() >= 4 &&
           headers.substr(headers.length() - 4) == "\r\n\r\n") {
         headerDone = true;
+        break;
       }
     }
 
@@ -523,6 +525,7 @@ public:
   vector<WindowsVersion> Versions;
   const wstring OrgId = L"y6jn8c31";
   const wstring ProfileId = L"606624d44113";
+  const wstring InstanceId = L"560dc9f3-1aa5-4a2f-b63c-9e18f8d0e175";
 
   WhitebarClient() { InitializeData(); }
 
@@ -531,9 +534,10 @@ public:
     w11.Name = L"Windows 11";
     w11.PageType = L"windows11";
     WindowsRelease r11;
-    r11.Name = L"25H2 (Build 26200.6584 - 2025.10)";
-    r11.Editions.push_back({L"Windows 11 Home/Pro/Edu", 3262});
-    r11.Editions.push_back({L"Windows 11 Home China", 3263});
+    r11.Name = L"25H2 v2 (Build 26200.8037 - 2026.03)";
+    r11.Editions.push_back({L"Windows 11 Home/Pro/Edu", {3321, 3324}});
+    r11.Editions.push_back({L"Windows 11 Home China", {3322, 3325}});
+    r11.Editions.push_back({L"Windows 11 Pro China", {3323, 3326}});
     w11.Releases.push_back(r11);
     Versions.push_back(w11);
 
@@ -542,14 +546,16 @@ public:
     w10.PageType = L"Windows10ISO";
     WindowsRelease r10;
     r10.Name = L"22H2 v1 (Build 19045.2965 - 2023.05)";
-    r10.Editions.push_back({L"Windows 10 Home/Pro/Edu", 2618});
-    r10.Editions.push_back({L"Windows 10 Home China", 2378});
+    r10.Editions.push_back({L"Windows 10 Home/Pro/Edu", {2618}});
+    r10.Editions.push_back({L"Windows 10 Home China", {2378}});
     w10.Releases.push_back(r10);
     Versions.push_back(w10);
 
     WindowsVersion uefi22;
     uefi22.Name = L"UEFI Shell 2.2";
     uefi22.PageType = L"UEFI_SHELL 2.2";
+    AddUefiRelease(uefi22, L"26H1 (edk2-stable202602)");
+    AddUefiRelease(uefi22, L"25H2 (edk2-stable202511)");
     AddUefiRelease(uefi22, L"25H1 (edk2-stable202505)");
     AddUefiRelease(uefi22, L"24H2 (edk2-stable202411)");
     AddUefiRelease(uefi22, L"24H1 (edk2-stable202405)");
@@ -572,9 +578,9 @@ public:
   void AddUefiRelease(WindowsVersion &ver, wstring name, bool hasDebug = true) {
     WindowsRelease r;
     r.Name = name;
-    r.Editions.push_back({L"Release", 0});
+    r.Editions.push_back({L"Release", {0}});
     if (hasDebug)
-      r.Editions.push_back({L"Debug", 1});
+      r.Editions.push_back({L"Debug", {1}});
     ver.Releases.push_back(r);
   }
 
@@ -585,46 +591,105 @@ public:
       results.push_back({L"en-us", L"English (US)", 0, L""});
       return results;
     }
-    wstring sessionId = GenerateGuid();
-    MakeRequest(L"https://vlscppe.microsoft.com/tags?org_id=" + OrgId +
-                L"&session_id=" + sessionId);
-    wstring url =
-        L"https://www.microsoft.com/software-download-connector/api/"
-        L"getskuinformationbyproductedition?profile=" +
-        ProfileId + L"&productEditionId=" + to_wstring(ed.Id) +
-        L"&SKU=undefined&friendlyFileName=undefined&Locale=en-US&sessionID=" +
-        sessionId;
-    string json = MakeRequest(url);
+    for (int id : ed.Ids) {
+      wstring sessionId = GenerateGuid();
 
-    size_t arrayStart = json.find("\"Skus\":[");
-    if (arrayStart == string::npos)
-      return results;
-    size_t current = arrayStart;
-    while ((current = json.find("{", current)) != string::npos) {
-      size_t endObj = json.find("}", current);
-      if (endObj == string::npos)
-        break;
-      string obj = json.substr(current, endObj - current + 1);
-      WindowsLanguage lang;
-      lang.SessionId = sessionId;
-      string idStr = ExtractJsonValue(obj, "Id");
-      if (!idStr.empty()) {
-        try {
-          lang.SkuId = stoi(idStr);
-        } catch (...) {
-          continue;
+      // Microsoft download "protection" requires the sessionId to be whitelisted through vlscppe.microsoft.com/tags
+      MakeRequest(L"https://vlscppe.microsoft.com/tags?org_id=" + OrgId +
+                  L"&session_id=" + sessionId);
+
+      // Microsoft download "protection" also requires an ov-df.microsoft.com request/reply
+      // 1) Request mdt.js to get w and rticks. InstanceId is (currently) constant.
+      wstring mdtUrl = L"https://ov-df.microsoft.com/mdt.js"
+                       L"?instanceId=" + InstanceId +
+                       L"&PageId=si"
+                       L"&session_id=" + sessionId;
+      string mdtResp = MakeRequest(mdtUrl);
+      string w_val = "";
+      string rticks_val = "";
+      try {
+        regex re_w("[?&]w=([A-Fa-f0-9]+)");
+        smatch match_w;
+        if (regex_search(mdtResp, match_w, re_w)) {
+          w_val = match_w[1].str();
         }
-        lang.Name = ToWString(ExtractJsonValue(obj, "Language"));
-        lang.DisplayName =
-            ToWString(ExtractJsonValue(obj, "LocalizedLanguage"));
-        bool exists = false;
-        for (const auto &l : results)
-          if (l.Name == lang.Name)
-            exists = true;
-        if (!exists)
-          results.push_back(lang);
+        regex re_rticks("rticks\\s*=\\s*\"\\+?(\\d+)");
+        smatch match_rticks;
+        if (regex_search(mdtResp, match_rticks, re_rticks)) {
+          rticks_val = match_rticks[1].str();
+        }
+      } catch (...) {
       }
-      current = endObj + 1;
+
+      if (!w_val.empty() && !rticks_val.empty()) {
+        // 2) Send a reply with session ID, current epoch and previously retrieved w and rticks
+        auto duration = std::chrono::system_clock::now().time_since_epoch();
+        auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+        wstring replyUrl = L"https://ov-df.microsoft.com/"
+                           L"?session_id=" + sessionId +
+                           L"&CustomerId=" + InstanceId +
+                           L"&PageId=si"
+                           L"&w=" + ToWString(w_val) +
+                           L"&mdt=" + to_wstring(millis) +
+                           L"&rticks=" + ToWString(rticks_val);
+        MakeRequest(replyUrl);
+      }
+
+      // May require a few attempts.
+      int attempt = 0;
+      string json;
+      while (true) {
+        if (attempt != 0) {
+          std::this_thread::sleep_for(std::chrono::seconds(2));
+        }
+
+        wstring url =
+            L"https://www.microsoft.com/software-download-connector/api/"
+            L"getskuinformationbyproductedition?profile=" +
+            ProfileId + L"&productEditionId=" + to_wstring(id) +
+            L"&SKU=undefined&friendlyFileName=undefined&Locale=en-US&sessionID=" +
+            sessionId;
+        json = MakeRequest(url);
+
+        bool success = (json.find("\"Skus\":[") != string::npos);
+        if (!success) {
+          if (++attempt <= 2) {
+            continue;
+          }
+        }
+        break;
+      }
+
+      size_t arrayStart = json.find("\"Skus\":[");
+      if (arrayStart == string::npos)
+        continue;
+      size_t current = arrayStart;
+      while ((current = json.find("{", current)) != string::npos) {
+        size_t endObj = json.find("}", current);
+        if (endObj == string::npos)
+          break;
+        string obj = json.substr(current, endObj - current + 1);
+        WindowsLanguage lang;
+        lang.SessionId = sessionId;
+        string idStr = ExtractJsonValue(obj, "Id");
+        if (!idStr.empty()) {
+          try {
+            lang.SkuId = stoi(idStr);
+          } catch (...) {
+            continue;
+          }
+          lang.Name = ToWString(ExtractJsonValue(obj, "Language"));
+          lang.DisplayName =
+              ToWString(ExtractJsonValue(obj, "LocalizedLanguage"));
+          bool exists = false;
+          for (const auto &l : results)
+            if (l.Name == lang.Name)
+              exists = true;
+          if (!exists)
+            results.push_back(lang);
+        }
+        current = endObj + 1;
+      }
     }
     return results;
   }
@@ -640,7 +705,7 @@ public:
       wstring baseUrl =
           L"https://github.com/pbatard/UEFI-Shell/releases/download/" + tag;
       wstring isoName = L"/UEFI-Shell-" + shellVer + L"-" + tag;
-      isoName += (ed.Id == 0) ? L"-RELEASE.iso" : L"-DEBUG.iso";
+      isoName += (ed.Ids[0] == 0) ? L"-RELEASE.iso" : L"-DEBUG.iso";
       wstring xmlUrl = baseUrl + L"/Version.xml";
       string xml = MakeRequest(xmlUrl);
       DownloadLink link;
