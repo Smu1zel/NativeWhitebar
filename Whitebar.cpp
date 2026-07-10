@@ -79,9 +79,12 @@ typedef struct in_addr IN_ADDR;
 #include <thread>
 #include <vector>
 
-// OpenSSL Headers
-#include <openssl/err.h>
-#include <openssl/ssl.h>
+// mbedtls Headers
+#include <mbedtls/net_sockets.h>
+#include <mbedtls/ssl.h>
+#include <mbedtls/entropy.h>
+#include <mbedtls/ctr_drbg.h>
+#include <mbedtls/error.h>
 
 using namespace std;
 
@@ -199,82 +202,6 @@ bool ParseUrl(const string &url, string &host, string &path, bool &isHttps) {
   return true;
 }
 
-// Helper types for dynamic loading of XP+ networking functions (getaddrinfo)
-#ifdef _WIN32
-typedef int(WSAAPI *getaddrinfo_t)(const char *, const char *,
-                                   const struct addrinfo *, struct addrinfo **);
-typedef void(WSAAPI *freeaddrinfo_t)(struct addrinfo *);
-
-getaddrinfo_t p_getaddrinfo = NULL;
-freeaddrinfo_t p_freeaddrinfo = NULL;
-
-void LoadNetworking() {
-  HMODULE hWs2 = LoadLibraryA("ws2_32.dll");
-  if (hWs2) {
-    p_getaddrinfo = (getaddrinfo_t)GetProcAddress(hWs2, "getaddrinfo");
-    p_freeaddrinfo = (freeaddrinfo_t)GetProcAddress(hWs2, "freeaddrinfo");
-  }
-}
-#else
-// Linux: Use standard functions directly
-#define p_getaddrinfo getaddrinfo
-#define p_freeaddrinfo freeaddrinfo
-void LoadNetworking() {}
-#endif
-
-// Win2k Compatible Host Resolution
-// Returns a socket connected to the host/port
-SOCKET ConnectToHost(const string &host, bool isHttps) {
-  if (p_getaddrinfo) {
-    // Modern (XP+) Path
-    struct addrinfo hints = {0}, *res = NULL;
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_protocol = IPPROTO_TCP;
-
-    if (p_getaddrinfo(host.c_str(), isHttps ? "443" : "80", &hints, &res) !=
-        0) {
-      return INVALID_SOCKET;
-    }
-
-    SOCKET sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (sock == INVALID_SOCKET) {
-      p_freeaddrinfo(res);
-      return INVALID_SOCKET;
-    }
-
-    if (connect(sock, res->ai_addr, (int)res->ai_addrlen) == SOCKET_ERROR) {
-      closesocket(sock);
-      p_freeaddrinfo(res);
-      return INVALID_SOCKET;
-    }
-    p_freeaddrinfo(res);
-    return sock;
-  } else {
-    // Legacy (Win2k) Path using gethostbyname (IPv4 only)
-    struct hostent *he = gethostbyname(host.c_str());
-    if (!he)
-      return INVALID_SOCKET;
-
-    struct sockaddr_in addr;
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(isHttps ? 443 : 80);
-    addr.sin_addr = *((struct in_addr *)he->h_addr);
-    memset(&(addr.sin_zero), 0, 8);
-
-    SOCKET sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock == INVALID_SOCKET)
-      return INVALID_SOCKET;
-
-    if (connect(sock, (struct sockaddr *)&addr, sizeof(struct sockaddr)) ==
-        SOCKET_ERROR) {
-      closesocket(sock);
-      return INVALID_SOCKET;
-    }
-    return sock;
-  }
-}
-
 // Helper for both API requests and File Downloads
 // returns true if success
 bool PerformRequest(const string &urlStr, const string &method,
@@ -290,37 +217,84 @@ bool PerformRequest(const string &urlStr, const string &method,
     if (!ParseUrl(currentUrl, host, path, isHttps))
       return false;
 
-#ifdef _WIN32
-    WSADATA wsaData;
-    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
-      return false;
-#endif
+    mbedtls_net_context server_fd;
+    mbedtls_ssl_context ssl;
+    mbedtls_ssl_config conf;
+    mbedtls_ctr_drbg_context ctr_drbg;
+    mbedtls_entropy_context entropy;
 
-    SOCKET sock = ConnectToHost(host, isHttps);
-    if (sock == INVALID_SOCKET) {
-      WSACleanup();
+    mbedtls_net_init(&server_fd);
+    mbedtls_ssl_init(&ssl);
+    mbedtls_ssl_config_init(&conf);
+    mbedtls_ctr_drbg_init(&ctr_drbg);
+    mbedtls_entropy_init(&entropy);
+
+    const char *pers = "whitebar_client";
+    if (mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy,
+                              (const unsigned char *)pers, strlen(pers)) != 0) {
+      mbedtls_net_free(&server_fd);
+      mbedtls_ssl_free(&ssl);
+      mbedtls_ssl_config_free(&conf);
+      mbedtls_ctr_drbg_free(&ctr_drbg);
+      mbedtls_entropy_free(&entropy);
       return false;
     }
 
-    SSL_CTX *ctx = NULL;
-    SSL *ssl = NULL;
+    if (mbedtls_ssl_config_defaults(&conf,
+                                    MBEDTLS_SSL_IS_CLIENT,
+                                    MBEDTLS_SSL_TRANSPORT_STREAM,
+                                    MBEDTLS_SSL_PRESET_DEFAULT) != 0) {
+      mbedtls_net_free(&server_fd);
+      mbedtls_ssl_free(&ssl);
+      mbedtls_ssl_config_free(&conf);
+      mbedtls_ctr_drbg_free(&ctr_drbg);
+      mbedtls_entropy_free(&entropy);
+      return false;
+    }
+
+    mbedtls_ssl_conf_authmode(&conf, MBEDTLS_SSL_VERIFY_NONE);
+    mbedtls_ssl_conf_rng(&conf, mbedtls_ctr_drbg_random, &ctr_drbg);
+
+    string portStr = isHttps ? "443" : "80";
+    if (mbedtls_net_connect(&server_fd, host.c_str(), portStr.c_str(), MBEDTLS_NET_PROTO_TCP) != 0) {
+      mbedtls_net_free(&server_fd);
+      mbedtls_ssl_free(&ssl);
+      mbedtls_ssl_config_free(&conf);
+      mbedtls_ctr_drbg_free(&ctr_drbg);
+      mbedtls_entropy_free(&entropy);
+      return false;
+    }
 
     if (isHttps) {
-      ctx = SSL_CTX_new(TLS_client_method());
-      if (!ctx) {
-        closesocket(sock);
-        WSACleanup();
+      if (mbedtls_ssl_setup(&ssl, &conf) != 0) {
+        mbedtls_net_free(&server_fd);
+        mbedtls_ssl_free(&ssl);
+        mbedtls_ssl_config_free(&conf);
+        mbedtls_ctr_drbg_free(&ctr_drbg);
+        mbedtls_entropy_free(&entropy);
         return false;
       }
-      SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
-      ssl = SSL_new(ctx);
-      SSL_set_fd(ssl, (int)sock);
-      SSL_set_tlsext_host_name(ssl, host.c_str());
-      if (SSL_connect(ssl) <= 0) {
-        SSL_free(ssl);
-        SSL_CTX_free(ctx);
-        closesocket(sock);
-        WSACleanup();
+      mbedtls_ssl_set_bio(&ssl, &server_fd, mbedtls_net_send, mbedtls_net_recv, NULL);
+      if (mbedtls_ssl_set_hostname(&ssl, host.c_str()) != 0) {
+        mbedtls_net_free(&server_fd);
+        mbedtls_ssl_free(&ssl);
+        mbedtls_ssl_config_free(&conf);
+        mbedtls_ctr_drbg_free(&ctr_drbg);
+        mbedtls_entropy_free(&entropy);
+        return false;
+      }
+      int ret;
+      while ((ret = mbedtls_ssl_handshake(&ssl)) != 0) {
+        if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
+          break;
+        }
+      }
+      if (ret != 0) {
+        mbedtls_net_free(&server_fd);
+        mbedtls_ssl_free(&ssl);
+        mbedtls_ssl_config_free(&conf);
+        mbedtls_ctr_drbg_free(&ctr_drbg);
+        mbedtls_entropy_free(&entropy);
         return false;
       }
     }
@@ -334,19 +308,51 @@ bool PerformRequest(const string &urlStr, const string &method,
     req << "Connection: close\r\n\r\n";
     string request = req.str();
 
-    if (isHttps)
-      SSL_write(ssl, request.c_str(), (int)request.length());
-    else
-      send(sock, request.c_str(), (int)request.length(), 0);
+    int written = 0;
+    int to_write = request.length();
+    const char *buf = request.c_str();
+    bool writeFailed = false;
+    while (written < to_write) {
+      int ret;
+      if (isHttps) {
+        ret = mbedtls_ssl_write(&ssl, (const unsigned char *)(buf + written), to_write - written);
+      } else {
+        ret = mbedtls_net_send(&server_fd, (const unsigned char *)(buf + written), to_write - written);
+      }
+      if (ret <= 0) {
+        if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE)
+          continue;
+        writeFailed = true;
+        break;
+      }
+      written += ret;
+    }
+
+    if (writeFailed) {
+      mbedtls_net_free(&server_fd);
+      mbedtls_ssl_free(&ssl);
+      mbedtls_ssl_config_free(&conf);
+      mbedtls_ctr_drbg_free(&ctr_drbg);
+      mbedtls_entropy_free(&entropy);
+      return false;
+    }
 
     // Read Headers
     string headers;
     char buffer[1];
     bool headerDone = false;
     while (true) {
-      int r = isHttps ? SSL_read(ssl, buffer, 1) : recv(sock, buffer, 1, 0);
-      if (r <= 0)
+      int r;
+      if (isHttps) {
+        r = mbedtls_ssl_read(&ssl, (unsigned char *)buffer, 1);
+      } else {
+        r = mbedtls_net_recv(&server_fd, (unsigned char *)buffer, 1);
+      }
+      if (r <= 0) {
+        if (r == MBEDTLS_ERR_SSL_WANT_READ || r == MBEDTLS_ERR_SSL_WANT_WRITE)
+          continue;
         break;
+      }
       headers += buffer[0];
       if (headers.length() >= 4 &&
           headers.substr(headers.length() - 4) == "\r\n\r\n") {
@@ -355,18 +361,21 @@ bool PerformRequest(const string &urlStr, const string &method,
       }
     }
 
-    if (!headerDone) { /* cleanup */
+    if (!headerDone) {
+      mbedtls_net_free(&server_fd);
+      mbedtls_ssl_free(&ssl);
+      mbedtls_ssl_config_free(&conf);
+      mbedtls_ctr_drbg_free(&ctr_drbg);
+      mbedtls_entropy_free(&entropy);
       return false;
     }
 
-    // Parse Status Code (simplistic)
     int statusCode = 0;
     size_t firstSpace = headers.find(" ");
     if (firstSpace != string::npos) {
       statusCode = atoi(headers.substr(firstSpace + 1, 3).c_str());
     }
 
-    // Handle Redirects
     if (statusCode == 301 || statusCode == 302) {
       size_t locPos = headers.find("\nLocation: ");
       if (locPos == string::npos)
@@ -375,28 +384,25 @@ bool PerformRequest(const string &urlStr, const string &method,
         size_t endLoc = headers.find("\r", locPos);
         currentUrl = headers.substr(locPos + 11, endLoc - (locPos + 11));
 
-        // Cleanup current connection
         if (isHttps) {
-          SSL_shutdown(ssl);
-          SSL_free(ssl);
-          SSL_CTX_free(ctx);
+          mbedtls_ssl_close_notify(&ssl);
         }
-        closesocket(sock);
-        WSACleanup();
+        mbedtls_net_free(&server_fd);
+        mbedtls_ssl_free(&ssl);
+        mbedtls_ssl_config_free(&conf);
+        mbedtls_ctr_drbg_free(&ctr_drbg);
+        mbedtls_entropy_free(&entropy);
         redirects++;
-        continue; // Loop again with new URL
+        continue;
       }
     }
 
-    // Handle Body
     if (downloadToFile) {
 #ifdef _WIN32
       ofstream outfile(filePath.c_str(), ios::binary);
 #else
       ofstream outfile(ToString(filePath), ios::binary);
 #endif
-
-      // Get Content-Length for progress
       long long totalSize = 0;
       size_t clPos = headers.find("\nContent-Length: ");
       if (clPos != string::npos) {
@@ -411,14 +417,22 @@ bool PerformRequest(const string &urlStr, const string &method,
       long long downloaded = 0;
       int r;
       int lastPct = -1;
-      while ((r = (isHttps ? SSL_read(ssl, chunk, sizeof(chunk))
-                           : recv(sock, chunk, sizeof(chunk), 0))) > 0) {
+      while (true) {
         if (!g_appRunning)
           break;
+        if (isHttps) {
+          r = mbedtls_ssl_read(&ssl, (unsigned char *)chunk, sizeof(chunk));
+        } else {
+          r = mbedtls_net_recv(&server_fd, (unsigned char *)chunk, sizeof(chunk));
+        }
+        if (r <= 0) {
+          if (r == MBEDTLS_ERR_SSL_WANT_READ || r == MBEDTLS_ERR_SSL_WANT_WRITE)
+            continue;
+          break;
+        }
         outfile.write(chunk, r);
         downloaded += r;
 
-        // Update Progress Callback
         if (cb && totalSize > 0) {
           int pct = (int)((downloaded * 100) / totalSize);
           if (pct != lastPct) {
@@ -429,23 +443,32 @@ bool PerformRequest(const string &urlStr, const string &method,
       }
       outfile.close();
     } else {
-      // String response
       char chunk[4096];
       int r;
-      while ((r = (isHttps ? SSL_read(ssl, chunk, sizeof(chunk) - 1)
-                           : recv(sock, chunk, sizeof(chunk) - 1, 0))) > 0) {
+      while (true) {
+        if (isHttps) {
+          r = mbedtls_ssl_read(&ssl, (unsigned char *)chunk, sizeof(chunk) - 1);
+        } else {
+          r = mbedtls_net_recv(&server_fd, (unsigned char *)chunk, sizeof(chunk) - 1);
+        }
+        if (r <= 0) {
+          if (r == MBEDTLS_ERR_SSL_WANT_READ || r == MBEDTLS_ERR_SSL_WANT_WRITE)
+            continue;
+          break;
+        }
         chunk[r] = 0;
         responseBody.append(chunk, r);
       }
     }
 
     if (isHttps) {
-      SSL_shutdown(ssl);
-      SSL_free(ssl);
-      SSL_CTX_free(ctx);
+      mbedtls_ssl_close_notify(&ssl);
     }
-    closesocket(sock);
-    WSACleanup();
+    mbedtls_net_free(&server_fd);
+    mbedtls_ssl_free(&ssl);
+    mbedtls_ssl_config_free(&conf);
+    mbedtls_ctr_drbg_free(&ctr_drbg);
+    mbedtls_entropy_free(&entropy);
     return true;
   }
   return false;
@@ -1552,7 +1575,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                    LPSTR lpCmdLine, int nCmdShow) {
   EnableDPI();
   InitCommonControls();
-  LoadNetworking();
 
   // Load XP-only console functions dynamically
   HMODULE hKernel32 = GetModuleHandle(L"kernel32.dll");

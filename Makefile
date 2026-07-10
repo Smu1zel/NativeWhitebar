@@ -1,6 +1,6 @@
 # Compiler and flags
 CXX = g++
-CXXFLAGS = -I/c/Users/Lynden/Downloads/openssl/include -L/c/Users/Lynden/Downloads/openssl -o Whitebar.exe -mconsole -mwindows -static -lssl -lcrypto -lws2_32 -lcomctl32 -lgdi32 -lole32 -lrpcrt4 -lcrypt32 -mno-mmx -mno-sse -mno-sse2 -lcomdlg32
+CXXFLAGS = -Os -s -o Whitebar.exe -mconsole -mwindows -static -lmbedtls -lmbedx509 -lmbedcrypto -lws2_32 -lcomctl32 -lgdi32 -lole32 -lrpcrt4 -lcrypt32 -lbcrypt -mno-mmx -mno-sse -mno-sse2 -lcomdlg32
 
 # Resource compiler
 RC = windres
@@ -26,9 +26,8 @@ main.o: $(SRC)
 # Link everything
 $(TARGET): $(OBJ)
 	$(CXX) $(OBJ) \
-	-L/c/Users/Lynden/Downloads/openssl \
-	-lssl -lcrypto -lws2_32 -lcomctl32 -lgdi32 -lole32 -lrpcrt4 -lcrypt32 -lcomdlg32 \
-	-mwindows -static \
+	-lmbedtls -lmbedx509 -lmbedcrypto -lws2_32 -lcomctl32 -lgdi32 -lole32 -lrpcrt4 -lcrypt32 -lbcrypt -lcomdlg32 \
+	-mwindows -static -s \
 	-o $(TARGET)
 
 # Clean
