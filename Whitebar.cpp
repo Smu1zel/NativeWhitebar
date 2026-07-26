@@ -874,6 +874,14 @@ vector<DownloadLink> g_links;
 
 #ifdef _WIN32
 
+#if defined(_RUFLUX) || defined(_RUFUS)
+#ifndef UM_SELECT_ISO
+#define UM_SELECT_ISO (WM_APP + 8)
+#endif
+extern "C" HWND hMainDialog;
+static wstring g_lastDownloadedFilePath;
+#endif
+
 #define ID_COMBO_VER 101
 #define ID_COMBO_REL 102
 #define ID_COMBO_ED 103
@@ -1034,7 +1042,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP, marginX, currentY,
         Scale(200, s), Scale(20, s), hWnd, (HMENU)ID_CHECK_DL, NULL, NULL);
     SendMessage(hCheckDl, WM_SETFONT, (WPARAM)hFont, TRUE);
+    SendMessage(hCheckDl, BM_SETCHECK, BST_CHECKED, 0);
+#if defined(_RUFLUX) || defined(_RUFUS)
+    ShowWindow(hCheckDl, SW_HIDE);
+#else
     currentY += Scale(25, s);
+#endif
 
     // Download Button
     hBtnDownload =
@@ -1100,6 +1113,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         if (GetSaveFileName(&ofn) == TRUE) {
           wstring filePath = ofn.lpstrFile;
+#if defined(_RUFLUX) || defined(_RUFUS)
+          g_lastDownloadedFilePath = filePath;
+#endif
           EnableWindow(hBtnDownload, FALSE);
           EnableWindow(hCheckDl, FALSE);
           for (int i = 0; i < 5; i++)
@@ -1152,12 +1168,17 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
     SetStatus(wParam == 1 ? L"Download Complete!" : L"Download Failed.");
     SendMessage(hProgress, PBM_SETPOS, 0, 0);
-    if (wParam == 1)
+    if (wParam == 1) {
+#if defined(_RUFLUX) || defined(_RUFUS)
+      string pathUtf8 = ToString(g_lastDownloadedFilePath);
+      PostMessage(hMainDialog, UM_SELECT_ISO, 0, (LPARAM)_strdup(pathUtf8.c_str()));
+#endif
       MessageBox(hWnd, L"Download completed successfully.", L"Success",
                  MB_OK | MB_ICONINFORMATION);
-    else
+    } else {
       MessageBox(hWnd, L"Download failed. Check internet connection.", L"Error",
                  MB_OK | MB_ICONERROR);
+    }
     break;
   case WM_CTLCOLORSTATIC:
     return (LRESULT)GetStockObject(WHITE_BRUSH);
