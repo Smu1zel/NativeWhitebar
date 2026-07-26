@@ -1,6 +1,6 @@
 # Compiler and flags
 CXX = g++
-CXXFLAGS = -Os -s -o Whitebar.exe -mconsole -mwindows -static -lmbedtls -lmbedx509 -lmbedcrypto -lws2_32 -lcomctl32 -lgdi32 -lole32 -lrpcrt4 -lcrypt32 -lbcrypt -mno-mmx -mno-sse -mno-sse2 -lcomdlg32
+CXXFLAGS = -std=c++11 -Os -s -o Whitebar.exe -mconsole -mwindows -static -lmbedtls -lmbedx509 -lmbedcrypto -lws2_32 -lcomctl32 -lgdi32 -lole32 -lrpcrt4 -lcrypt32 -lbcrypt -mno-mmx -mno-sse -mno-sse2 -lcomdlg32
 
 # Resource compiler
 RC = windres

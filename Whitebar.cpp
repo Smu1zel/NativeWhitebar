@@ -893,9 +893,9 @@ static wstring g_lastDownloadedFilePath;
 #define WM_DATA_READY (WM_USER + 1)
 #define WM_DOWNLOAD_DONE (WM_USER + 2)
 
-HWND hCombos[5];
-HWND hBtnDownload, hStatus, hCheckDl, hProgress;
-HFONT hFont;
+static HWND hCombos[5];
+static HWND hBtnDownload, hStatus, hCheckDl, hProgress;
+static HFONT hFont;
 
 float GetDpiScale() {
   HDC hdc = GetDC(NULL);
