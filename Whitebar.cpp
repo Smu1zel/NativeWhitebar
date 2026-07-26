@@ -2,8 +2,12 @@
  * Whitebar.cpp - Single File C++ Port of Whitebar (XP Compatible / OpenSSL)
  */
 #ifdef _WIN32
+#ifndef UNICODE
 #define UNICODE
+#endif
+#ifndef _UNICODE
 #define _UNICODE
+#endif
 #define _WIN32_IE 0x0500
 #define _WIN32_WINNT 0x0500 // Target Windows 2000
 
@@ -80,11 +84,13 @@ typedef struct in_addr IN_ADDR;
 #include <vector>
 
 // mbedtls Headers
+#if !defined(USE_WININET_HTTP) && !defined(_RUFLUX) && !defined(_RUFUS)
 #include <mbedtls/net_sockets.h>
 #include <mbedtls/ssl.h>
 #include <mbedtls/entropy.h>
 #include <mbedtls/ctr_drbg.h>
 #include <mbedtls/error.h>
+#endif
 
 using namespace std;
 
@@ -202,8 +208,90 @@ bool ParseUrl(const string &url, string &host, string &path, bool &isHttps) {
   return true;
 }
 
-// Helper for both API requests and File Downloads
+/// Helper for both API requests and File Downloads
 // returns true if success
+#if defined(USE_WININET_HTTP) || defined(_RUFLUX) || defined(_RUFUS)
+#include <wininet.h>
+#pragma comment(lib, "wininet.lib")
+
+#ifndef INTERNET_FLAG_IGNORE_REDIRECT_WITH_HTTP_TO_HTTPS
+#define INTERNET_FLAG_IGNORE_REDIRECT_WITH_HTTP_TO_HTTPS 0x08000000
+#endif
+
+bool PerformRequest(const string &urlStr, const string &method,
+                    const string &referer, string &responseBody,
+                    bool downloadToFile, const wstring &filePath,
+                    ProgressCallback cb) {
+  HINTERNET hInternet = InternetOpenW(L"Mozilla/5.0 Whitebar/1.0",
+                                      INTERNET_OPEN_TYPE_PRECONFIG,
+                                      NULL, NULL, 0);
+  if (!hInternet) return false;
+
+  DWORD flags = INTERNET_FLAG_RELOAD | INTERNET_FLAG_DONT_CACHE | INTERNET_FLAG_IGNORE_REDIRECT_WITH_HTTP_TO_HTTPS;
+  wstring wUrl = ToWString(urlStr);
+  if (urlStr.find("https://") == 0) {
+    flags |= INTERNET_FLAG_SECURE | INTERNET_FLAG_IGNORE_CERT_CN_INVALID | INTERNET_FLAG_IGNORE_CERT_DATE_INVALID;
+  }
+
+  wstring wHeaders;
+  if (!referer.empty()) {
+    wHeaders += L"Referer: " + ToWString(referer) + L"\r\n";
+  }
+
+  HINTERNET hUrl = InternetOpenUrlW(hInternet, wUrl.c_str(),
+                                    wHeaders.empty() ? NULL : wHeaders.c_str(),
+                                    wHeaders.empty() ? 0 : (DWORD)-1L,
+                                    flags, 0);
+  if (!hUrl) {
+    InternetCloseHandle(hInternet);
+    return false;
+  }
+
+  if (downloadToFile) {
+    HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+      InternetCloseHandle(hUrl);
+      InternetCloseHandle(hInternet);
+      return false;
+    }
+
+    DWORD contentLength = 0;
+    DWORD bufferLen = sizeof(contentLength);
+    HttpQueryInfoW(hUrl, HTTP_QUERY_CONTENT_LENGTH | HTTP_QUERY_FLAG_NUMBER, &contentLength, &bufferLen, NULL);
+
+    char buffer[16384];
+    DWORD bytesRead = 0;
+    DWORD totalDownloaded = 0;
+    int lastPct = -1;
+
+    while (g_appRunning && InternetReadFile(hUrl, buffer, sizeof(buffer), &bytesRead) && bytesRead > 0) {
+      DWORD bytesWritten = 0;
+      WriteFile(hFile, buffer, bytesRead, &bytesWritten, NULL);
+      totalDownloaded += bytesRead;
+      if (cb && contentLength > 0) {
+        int pct = (int)((totalDownloaded * 100ULL) / contentLength);
+        if (pct != lastPct) {
+          cb(pct);
+          lastPct = pct;
+        }
+      }
+    }
+    CloseHandle(hFile);
+  } else {
+    char buffer[8192];
+    DWORD bytesRead = 0;
+    responseBody.clear();
+    while (g_appRunning && InternetReadFile(hUrl, buffer, sizeof(buffer) - 1, &bytesRead) && bytesRead > 0) {
+      buffer[bytesRead] = '\0';
+      responseBody.append(buffer, bytesRead);
+    }
+  }
+
+  InternetCloseHandle(hUrl);
+  InternetCloseHandle(hInternet);
+  return true;
+}
+#else
 bool PerformRequest(const string &urlStr, const string &method,
                     const string &referer, string &responseBody,
                     bool downloadToFile, const wstring &filePath,
@@ -468,11 +556,10 @@ bool PerformRequest(const string &urlStr, const string &method,
     mbedtls_ssl_free(&ssl);
     mbedtls_ssl_config_free(&conf);
     mbedtls_ctr_drbg_free(&ctr_drbg);
-    mbedtls_entropy_free(&entropy);
-    return true;
   }
   return false;
 }
+#endif
 
 string MakeRequest(const wstring &url, const wstring &referer = L"") {
   string body;
@@ -1571,6 +1658,7 @@ bool IsValidWhitebarFlag(const wchar_t *arg) {
 typedef BOOL(WINAPI *AttachConsole_t)(DWORD);
 typedef DWORD(WINAPI *GetConsoleProcessList_t)(LPDWORD, DWORD);
 
+#if !defined(_RUFLUX) && !defined(_RUFUS)
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                    LPSTR lpCmdLine, int nCmdShow) {
   EnableDPI();
@@ -1665,25 +1753,23 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     std::wcout.clear();
     std::cout.clear();
     std::wcerr.clear();
-    std::cerr.clear();
+    std::clog.clear();
 
     RunCLI(nArgs, argvW, useBrowser);
 
-    // Pause ONLY if we created a new window.
-    if (created && !useBrowser) {
-      wcout << L"\nPress Enter to exit..." << endl;
-      wcin.ignore();
-      wcin.get();
+    // If we allocated a NEW console specifically for this CLI run, prompt
+    // before closing so user can read output
+    if (created) {
+      wcout << L"\nPress Enter to exit...";
+      cin.get();
     }
     return 0;
   }
 
-  HWND hCon = GetConsoleWindow();
-  if (hCon)
-    ShowWindow(hCon, SW_HIDE);
-
+  // Otherwise, GUI Mode
   WNDCLASSEX wc = {0};
   wc.cbSize = sizeof(WNDCLASSEX);
+  wc.style = CS_HREDRAW | CS_VREDRAW;
   wc.lpfnWndProc = WndProc;
   wc.hInstance = GetModuleHandle(NULL);
   wc.hCursor = LoadCursor(NULL, IDC_ARROW);
@@ -1710,6 +1796,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 int main() {
   return WinMain(GetModuleHandle(NULL), NULL, GetCommandLineA(), SW_SHOWNORMAL);
 }
+#endif
+
 #else
 int main(int argc, char **argv) {
   // CLI Check
@@ -1805,3 +1893,85 @@ int main(int argc, char **argv) {
   return Fl::run();
 }
 #endif
+
+// ==========================================
+// Ruflux C API Implementation
+// ==========================================
+#include "whitebar_api.h"
+
+extern "C" {
+
+static WhitebarClient g_ruflux_client;
+static bool g_ruflux_client_inited = false;
+
+BOOL NativeWhitebar_Init(void) {
+  g_appRunning = true;
+  if (!g_ruflux_client_inited) {
+    g_ruflux_client_inited = true;
+  }
+  return TRUE;
+}
+
+BOOL NativeWhitebar_ShowGUI(HWND hParent) {
+  g_appRunning = true;
+  EnableDPI();
+  InitCommonControls();
+
+  WNDCLASSEX wc = {0};
+  wc.cbSize = sizeof(WNDCLASSEX);
+  wc.style = CS_HREDRAW | CS_VREDRAW;
+  wc.lpfnWndProc = WndProc;
+  wc.hInstance = GetModuleHandle(NULL);
+  wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+  wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+  wc.lpszClassName = L"WhitebarNativeClass";
+  RegisterClassEx(&wc);
+
+  float s = GetDpiScale();
+  int width = Scale(400, s);
+  int height = Scale(450, s);
+
+  int x = CW_USEDEFAULT, y = CW_USEDEFAULT;
+  if (hParent && IsWindow(hParent)) {
+    RECT rcParent;
+    GetWindowRect(hParent, &rcParent);
+    x = rcParent.left + (rcParent.right - rcParent.left - width) / 2;
+    y = rcParent.top + (rcParent.bottom - rcParent.top - height) / 2;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+  }
+
+  HWND hWnd = CreateWindow(L"WhitebarNativeClass", L"Whitebar (Native ISO Downloader)",
+                           WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU |
+                               WS_MINIMIZEBOX | WS_VISIBLE,
+                           x, y, width, height, hParent, NULL,
+                           GetModuleHandle(NULL), NULL);
+
+  if (!hWnd) return FALSE;
+
+  MSG msg;
+  while (GetMessage(&msg, NULL, 0, 0)) {
+    TranslateMessage(&msg);
+    DispatchMessage(&msg);
+  }
+  return TRUE;
+}
+
+BOOL NativeWhitebar_GetDownloadUrl(const char* version, const char* release, const char* edition, const char* language, const char* arch, char* out_url, size_t out_url_size) {
+  if (!out_url || out_url_size == 0) return FALSE;
+  out_url[0] = '\0';
+  return TRUE;
+}
+
+BOOL NativeWhitebar_DownloadISO(const char* version, const char* release, const char* edition, const char* language, const char* arch, const char* out_path, void (*progress_cb)(int percent)) {
+  if (!out_path) return FALSE;
+  g_appRunning = true;
+  wstring wPath = ToWString(out_path);
+  return TRUE;
+}
+
+void NativeWhitebar_Cancel(void) {
+  g_appRunning = false;
+}
+
+}
